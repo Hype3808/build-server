@@ -53,18 +53,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Download and place Camoufox (Linux build) into the expected directory
 ARG CAMOUFOX_URL="https://github.com/daijro/camoufox/releases/download/v135.0.1-beta.24/camoufox-135.0.1-beta.24-lin.x86_64.zip"
 RUN set -eux; \
-        mkdir -p /app/camoufox-linux; \
-        curl -fsSL "$CAMOUFOX_URL" -o /tmp/camoufox.zip; \
-        unzip -q /tmp/camoufox.zip -d /tmp/camoufox; \
-        CAMOUFOX_BIN="$(find /tmp/camoufox -type f \( -name 'camoufox' -o -name 'camoufox*' \) -print -quit)"; \
-        if [ -z "$CAMOUFOX_BIN" ]; then \
-            echo "Camoufox binary not found in archive contents:" >&2; \
-            ls -R /tmp/camoufox >&2 || true; \
-            exit 1; \
-        fi; \
-        mv "$CAMOUFOX_BIN" /app/camoufox-linux/camoufox; \
-        chmod +x /app/camoufox-linux/camoufox; \
-        rm -rf /tmp/camoufox.zip /tmp/camoufox
+    mkdir -p /app/camoufox-linux; \
+    curl -fsSL "$CAMOUFOX_URL" -o /tmp/camoufox.zip; \
+    unzip -q /tmp/camoufox.zip -d /tmp/camoufox; \
+    echo "Archive contents:" >&2; \
+    ls -laR /tmp/camoufox >&2; \
+    CAMOUFOX_BIN="$(find /tmp/camoufox -type f -executable | head -n 1)"; \
+    if [ -z "$CAMOUFOX_BIN" ]; then \
+        echo "ERROR: No executable file found in archive" >&2; \
+        exit 1; \
+    fi; \
+    echo "Found binary at: $CAMOUFOX_BIN" >&2; \
+    cp -r /tmp/camoufox/* /app/camoufox-linux/ || mv "$CAMOUFOX_BIN" /app/camoufox-linux/camoufox; \
+    chmod +x /app/camoufox-linux/camoufox 2>/dev/null || chmod +x "$(find /app/camoufox-linux -type f -executable | head -n 1)"; \
+    rm -rf /tmp/camoufox.zip /tmp/camoufox
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
