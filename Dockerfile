@@ -56,8 +56,11 @@ RUN set -eux; \
     mkdir -p /app/camoufox-linux; \
     curl -fsSL "$CAMOUFOX_URL" -o /tmp/camoufox.zip; \
     unzip -q /tmp/camoufox.zip -d /tmp/camoufox; \
-    cp -r /tmp/camoufox/* /app/camoufox-linux/; \
-    find /app/camoufox-linux -type f -name "camoufox*" -exec chmod +x {} \;; \
+    ls -la /tmp/camoufox; \
+    cp -r /tmp/camoufox/* /app/camoufox-linux/ || true; \
+    ls -la /app/camoufox-linux; \
+    find /app/camoufox-linux -type f -executable -exec chmod +x {} + || true; \
+    chmod +x /app/camoufox-linux/camoufox* 2>/dev/null || true; \
     rm -rf /tmp/camoufox.zip /tmp/camoufox
 
 COPY --from=deps /app/node_modules ./node_modules
