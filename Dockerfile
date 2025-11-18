@@ -52,7 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Download and place Camoufox (Linux build) into the expected directory
 ARG CAMOUFOX_URL="https://github.com/daijro/camoufox/releases/download/v135.0.1-beta.24/camoufox-135.0.1-beta.24-lin.x86_64.zip"
-RUN set -eux; \
+RUN set -ux; \
     mkdir -p /app/camoufox-linux; \
     curl -fsSL "$CAMOUFOX_URL" -o /tmp/camoufox.zip; \
     unzip -q /tmp/camoufox.zip -d /tmp/camoufox; \
