@@ -56,16 +56,8 @@ RUN set -eux; \
     mkdir -p /app/camoufox-linux; \
     curl -fsSL "$CAMOUFOX_URL" -o /tmp/camoufox.zip; \
     unzip -q /tmp/camoufox.zip -d /tmp/camoufox; \
-    echo "Archive contents:" >&2; \
-    ls -laR /tmp/camoufox >&2; \
-    CAMOUFOX_BIN="$(find /tmp/camoufox -type f -executable | head -n 1)"; \
-    if [ -z "$CAMOUFOX_BIN" ]; then \
-        echo "ERROR: No executable file found in archive" >&2; \
-        exit 1; \
-    fi; \
-    echo "Found binary at: $CAMOUFOX_BIN" >&2; \
-    cp -r /tmp/camoufox/* /app/camoufox-linux/ || mv "$CAMOUFOX_BIN" /app/camoufox-linux/camoufox; \
-    chmod +x /app/camoufox-linux/camoufox 2>/dev/null || chmod +x "$(find /app/camoufox-linux -type f -executable | head -n 1)"; \
+    cp -r /tmp/camoufox/* /app/camoufox-linux/; \
+    find /app/camoufox-linux -type f -name "camoufox*" -exec chmod +x {} \;; \
     rm -rf /tmp/camoufox.zip /tmp/camoufox
 
 COPY --from=deps /app/node_modules ./node_modules
