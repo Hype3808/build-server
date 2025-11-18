@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  build-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CAMOUFOX_URL: ${CAMOUFOX_URL:-https://github.com/daijro/camoufox/releases/download/v135.0.1-beta.24/camoufox-135.0.1-beta.24-lin.x86_64.zip}
+    image: ghcr.io/hype3808/build-server:latest
+    restart: unless-stopped
+    environment:
+      # Override these in an .env file or directly in your deployment pipeline
+      PORT: 7860
+      WS_PORT: 9998
+      HOST: 0.0.0.0
+      API_KEYS: "123456"
+      CAMOUFOX_EXECUTABLE_PATH: /app/camoufox-linux/camoufox
+    ports:
+      - "7860:7860"
+      - "9998:9998"
+    env_file:
+      - .env
+    volumes:
+      - ./auth:/app/auth:ro
+      - ./runtime:/app/runtime
+#      - ./config.json:/app/config.json:ro
