@@ -63,6 +63,25 @@ function createRoutes(app, serverSystem) {
     };
   };
 
+  // Middleware to block API routes during system busy state
+  const _blockDuringSystemBusy = () => {
+    return (req, res, next) => {
+      if (requestHandler.isSystemBusy) {
+        logger.warn(
+          `[API] 请求被拒绝: 系统正在进行账号切换 - ${req.method} ${req.path}`
+        );
+        return res.status(503).json({
+          error: {
+            message: "正在更换账号中，请稍后再试",
+            code: 503,
+            type: "service_unavailable"
+          }
+        });
+      }
+      next();
+    };
+  };
+
   // Login routes
   app.get("/login", (req, res) => {
     if (req.session.isAuthenticated) {
@@ -363,6 +382,23 @@ ${accountDetailsHtml}
 
   // Apply auth middleware
   app.use(_createAuthMiddleware());
+
+  // Block v1/v1beta API routes during system busy (startup/account switching)
+  app.use(/^\/v1(beta)?\//i, (req, res, next) => {
+    if (requestHandler.isSystemBusy) {
+      logger.warn(
+        `[API] 请求被拒绝: 系统正在进行账号切换 - ${req.method} ${req.path}`
+      );
+      return res.status(503).json({
+        error: {
+          message: "正在更换账号中，请稍后再试",
+          code: 503,
+          type: "service_unavailable"
+        }
+      });
+    }
+    next();
+  });
 
   // Model list endpoint
   app.get("/v1/models", async (req, res) => {

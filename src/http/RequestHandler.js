@@ -260,6 +260,18 @@ class RequestHandler {
       );
     }
 
+    // Check if browser is ready
+    if (!this.browserManager.browser || !this.browserManager.page) {
+      this.logger.warn(
+        "[System] 收到新请求，但浏览器尚未完全初始化。"
+      );
+      return this._sendErrorResponse(
+        res,
+        503,
+        "系统正在启动中，请稍后再试"
+      );
+    }
+
     const isGenerativeRequest =
       req.method === "POST" &&
       (req.path.includes("generateContent") ||
@@ -323,6 +335,18 @@ class RequestHandler {
         res,
         503,
         "正在更换账号中，请稍后再试"
+      );
+    }
+
+    // Check if browser is ready
+    if (!this.browserManager.browser || !this.browserManager.page) {
+      this.logger.warn(
+        "[Request] 收到OpenAI请求，但浏览器尚未完全初始化。"
+      );
+      return this._sendErrorResponse(
+        res,
+        503,
+        "系统正在启动中，请稍后再试"
       );
     }
 

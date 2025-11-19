@@ -145,7 +145,7 @@ class BrowserManager {
 
       this.logger.info(`[Browser] 正在导航至目标网页...`);
       const targetUrl =
-        "https://aistudio.google.com/u/0/apps/bundled/blank?showAssistant=true&showPreview=true";
+        "https://aistudio.google.com/u/0/apps/bundled/blank?showCode=true&showAssistant=true";
       await this.page.goto(targetUrl, {
         timeout: 30000,
         waitUntil: "commit",
@@ -307,15 +307,31 @@ class BrowserManager {
       .first();
     let editorReady = false;
 
+    // Check if URL already has showCode=true
+    const currentUrl = this.page.url();
+    const hasShowCode = currentUrl.includes('showCode=true');
+    
+    if (hasShowCode) {
+      this.logger.info("[Browser] URL已包含showCode=true，编辑器应该已显示，跳过Code按钮步骤。");
+      // Wait a bit for editor to render
+      await this.page.waitForTimeout(1000);
+    }
+
     this.logger.info("[Browser] (快速路径) 尝试直接定位编辑器...");
     try {
       await editorContainerLocator.waitFor({ state: "visible", timeout: 10000 });
       editorReady = true;
       this.logger.info("[Browser] 编辑器已自动显示，跳过“Code”按钮步骤。");
     } catch (error) {
-      this.logger.info(
-        '[Browser] 未能直接定位编辑器，将执行点击 "Code" 按钮的回退流程...'
-      );
+      if (hasShowCode) {
+        this.logger.warn(
+          '[Browser] URL包含showCode=true但编辑器未显示，将尝试点击Code按钮...'
+        );
+      } else {
+        this.logger.info(
+          '[Browser] 未能直接定位编辑器，将执行点击 "Code" 按钮的回退流程...'
+        );
+      }
     }
 
     if (!editorReady) {
@@ -332,14 +348,26 @@ class BrowserManager {
           await this.page.locator('button:text("Code")').click({
             timeout: 5000,
           });
-          this.logger.info("  ✅ 点击成功！");
+          this.logger.info("✅ 点击成功！");
           
           // Wait a bit for any page transitions
           await this.page.waitForTimeout(1000);
           
           // Check if we're still on the same page
           const currentUrl = this.page.url();
-          this.logger.info(`  当前页面URL: ${currentUrl}`);
+          this.logger.info(`当前页面URL: ${currentUrl}`);
+          
+          // If URL changed to showPreview=true, correct it back to showCode=true
+          if (currentUrl.includes('showPreview=true') && !currentUrl.includes('showCode=true')) {
+            this.logger.warn("检测到URL被更改为showPreview=true，正在修正...");
+            const correctedUrl = currentUrl.replace('showPreview=true', 'showCode=true');
+            await this.page.goto(correctedUrl, {
+              timeout: 10000,
+              waitUntil: "commit",
+            });
+            this.logger.info("✅ URL已修正为showCode=true");
+            await this.page.waitForTimeout(500);
+          }
           
           editorReady = true;
           break;
