@@ -1,4 +1,4 @@
-# AIS2API - Google AI Studio Proxy Server
+# Build2API - Google AI Studio Proxy Server
 
 A proxy server that allows switching between multiple Google AI Studio accounts with automatic failover and OpenAI-compatible API endpoints.
 
@@ -217,3 +217,4 @@ Access the web UI at http://localhost:7860 and login with your API key.
 ## License
 
 See LICENSE file for details.
+
