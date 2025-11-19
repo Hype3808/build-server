@@ -193,10 +193,13 @@ class BrowserManager {
       this.logger.error(
         `❌ [Browser] 账户 ${authIndex} 的上下文初始化失败: ${error.message}`
       );
-      if (this.browser) {
-        await this.browser.close();
-        this.browser = null;
+      // Close context but keep browser running for retry
+      if (this.context) {
+        await this.context.close().catch(() => {});
+        this.context = null;
+        this.page = null;
       }
+      this.logger.info("[Browser] 浏览器实例保持运行以便重试");
       throw error;
     }
   }
@@ -330,6 +333,14 @@ class BrowserManager {
             timeout: 5000,
           });
           this.logger.info("  ✅ 点击成功！");
+          
+          // Wait a bit for any page transitions
+          await this.page.waitForTimeout(1000);
+          
+          // Check if we're still on the same page
+          const currentUrl = this.page.url();
+          this.logger.info(`  当前页面URL: ${currentUrl}`);
+          
           editorReady = true;
           break;
         } catch (error) {
@@ -349,7 +360,23 @@ class BrowserManager {
     this.logger.info(
       '[Browser] (步骤2/5) 等待编辑器变为可见...'
     );
-    await editorContainerLocator.waitFor({ state: "visible", timeout: 20000 });
+    
+    // Check if page is still loaded
+    if (this.page.isClosed()) {
+      throw new Error("页面已关闭，无法继续初始化");
+    }
+    
+    try {
+      await editorContainerLocator.waitFor({ state: "visible", timeout: 30000 });
+    } catch (error) {
+      this.logger.error(`[Browser] 编辑器未能在30秒内显示: ${error.message}`);
+      this.logger.info("[Browser] 尝试检查页面当前状态...");
+      const pageUrl = this.page.url();
+      const pageTitle = await this.page.title().catch(() => "无法获取");
+      this.logger.info(`[Browser] 当前URL: ${pageUrl}`);
+      this.logger.info(`[Browser] 页面标题: ${pageTitle}`);
+      throw error;
+    }
 
     this.logger.info(
       "[Browser] (清场 #2) 准备点击编辑器，再次强行移除所有可能的遮罩层..."
