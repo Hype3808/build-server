@@ -4,6 +4,15 @@ function createRoutes(app, serverSystem) {
   const { config, requestHandler, authSource, browserManager, logger } =
     serverSystem;
 
+  // Health check endpoint - MUST be first, no middleware, always responds
+  // This ensures the endpoint works even during browser/WebSocket recreation
+  app.get("/health", (req, res) => {
+    res.status(200).json({ 
+      status: "ok",
+      timestamp: new Date().toISOString()
+    });
+  });
+
   // Authentication middleware
   const isAuthenticated = (req, res, next) => {
     if (req.session.isAuthenticated) {
