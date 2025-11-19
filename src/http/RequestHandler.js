@@ -58,8 +58,8 @@ class RequestHandler {
     }
 
     // --- 加锁！ ---
-    this.isSystemBusy = true;
     this.isAuthSwitching = true;
+    this.isSystemBusy = true;
 
     try {
       const previousAuthIndex = this.currentAuthIndex;
@@ -256,7 +256,7 @@ class RequestHandler {
       return this._sendErrorResponse(
         res,
         503,
-        "服务器正在进行内部维护（账号切换/恢复），请稍后重试。"
+        "正在更换账号中，请稍后再试"
       );
     }
 
@@ -264,15 +264,6 @@ class RequestHandler {
       req.method === "POST" &&
       (req.path.includes("generateContent") ||
         req.path.includes("streamGenerateContent"));
-    if (this.config.switchOnUses > 0 && isGenerativeRequest) {
-      this.usageCount++;
-      this.logger.info(
-        `[Request] 生成请求 - 账号轮换计数: ${this.usageCount}/${this.config.switchOnUses} (当前账号: ${this.currentAuthIndex})`
-      );
-      if (this.usageCount >= this.config.switchOnUses) {
-        this.needsSwitchingAfterRequest = true;
-      }
-    }
 
     const proxyRequest = this._buildProxyRequest(req, requestId);
     proxyRequest.is_generative = isGenerativeRequest;
@@ -326,15 +317,13 @@ class RequestHandler {
     const isOpenAIStream = req.body.stream === true;
     const model = req.body.model || "gemini-1.5-pro-latest";
 
-    // Track usage count for account rotation
-    if (this.config.switchOnUses > 0) {
-      this.usageCount++;
-      this.logger.info(
-        `[Request] OpenAI生成请求 - 账号轮换计数: ${this.usageCount}/${this.config.switchOnUses} (当前账号: ${this.currentAuthIndex})`
+    if (this.isSystemBusy) {
+      this.logger.warn("[Request] 正在切换账号，拒绝新请求");
+      return this._sendErrorResponse(
+        res,
+        503,
+        "正在更换账号中，请稍后再试"
       );
-      if (this.usageCount >= this.config.switchOnUses) {
-        this.needsSwitchingAfterRequest = true;
-      }
     }
 
     // 1. 翻译请求体
@@ -521,6 +510,17 @@ class RequestHandler {
         );
         this.failureCount = 0;
       }
+      
+      // Increment usage count on successful request
+      if (this.config.switchOnUses > 0) {
+        this.usageCount++;
+        this.logger.info(
+          `[Request] OpenAI生成请求成功 - 账号轮换计数: ${this.usageCount}/${this.config.switchOnUses} (当前账号: ${this.currentAuthIndex})`
+        );
+        if (this.usageCount >= this.config.switchOnUses) {
+          this.needsSwitchingAfterRequest = true;
+        }
+      }
 
       // 获取完整响应数据
       const dataMessage = await messageQueue.dequeue();
@@ -589,6 +589,17 @@ class RequestHandler {
       );
       this.failureCount = 0;
     }
+    
+    // Increment usage count on successful request
+    if (this.config.switchOnUses > 0) {
+      this.usageCount++;
+      this.logger.info(
+        `[Request] OpenAI生成请求成功 - 账号轮换计数: ${this.usageCount}/${this.config.switchOnUses} (当前账号: ${this.currentAuthIndex})`
+      );
+      if (this.usageCount >= this.config.switchOnUses) {
+        this.needsSwitchingAfterRequest = true;
+      }
+    }
 
     res.status(200).set({
       "Content-Type": "text/event-stream",
@@ -653,6 +664,17 @@ class RequestHandler {
         `✅ [Auth] OpenAI接口请求成功 - 失败计数已从 ${this.failureCount} 重置为 0`
       );
       this.failureCount = 0;
+    }
+    
+    // Increment usage count on successful request
+    if (this.config.switchOnUses > 0) {
+      this.usageCount++;
+      this.logger.info(
+        `[Request] OpenAI生成请求成功 - 账号轮换计数: ${this.usageCount}/${this.config.switchOnUses} (当前账号: ${this.currentAuthIndex})`
+      );
+      if (this.usageCount >= this.config.switchOnUses) {
+        this.needsSwitchingAfterRequest = true;
+      }
     }
 
     let fullBody = "";
@@ -938,6 +960,18 @@ class RequestHandler {
         );
         this.failureCount = 0;
       }
+      
+      // Increment usage count on successful request
+      if (this.config.switchOnUses > 0 && proxyRequest.is_generative) {
+        this.usageCount++;
+        this.logger.info(
+          `[Request] 生成请求成功 - 账号轮换计数: ${this.usageCount}/${this.config.switchOnUses} (当前账号: ${this.currentAuthIndex})`
+        );
+        if (this.usageCount >= this.config.switchOnUses) {
+          this.needsSwitchingAfterRequest = true;
+        }
+      }
+      
       const dataMessage = await messageQueue.dequeue();
       const endMessage = await messageQueue.dequeue();
       if (dataMessage.data) {
@@ -999,6 +1033,17 @@ class RequestHandler {
         `✅ [Auth] 生成请求成功 - 失败计数已从 ${this.failureCount} 重置为 0`
       );
       this.failureCount = 0;
+    }
+    
+    // Increment usage count on successful request
+    if (this.config.switchOnUses > 0 && proxyRequest.is_generative) {
+      this.usageCount++;
+      this.logger.info(
+        `[Request] 生成请求成功 - 账号轮换计数: ${this.usageCount}/${this.config.switchOnUses} (当前账号: ${this.currentAuthIndex})`
+      );
+      if (this.usageCount >= this.config.switchOnUses) {
+        this.needsSwitchingAfterRequest = true;
+      }
     }
 
     this._setResponseHeaders(res, headerMessage);
@@ -1082,6 +1127,17 @@ class RequestHandler {
           `✅ [Auth] 非流式生成请求成功 - 失败计数已从 ${this.failureCount} 重置为 0`
         );
         this.failureCount = 0;
+      }
+      
+      // Increment usage count on successful request
+      if (this.config.switchOnUses > 0 && proxyRequest.is_generative) {
+        this.usageCount++;
+        this.logger.info(
+          `[Request] 生成请求成功 - 账号轮换计数: ${this.usageCount}/${this.config.switchOnUses} (当前账号: ${this.currentAuthIndex})`
+        );
+        if (this.usageCount >= this.config.switchOnUses) {
+          this.needsSwitchingAfterRequest = true;
+        }
       }
 
       try {
