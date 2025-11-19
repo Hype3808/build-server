@@ -326,6 +326,17 @@ class RequestHandler {
     const isOpenAIStream = req.body.stream === true;
     const model = req.body.model || "gemini-1.5-pro-latest";
 
+    // Track usage count for account rotation
+    if (this.config.switchOnUses > 0) {
+      this.usageCount++;
+      this.logger.info(
+        `[Request] OpenAI生成请求 - 账号轮换计数: ${this.usageCount}/${this.config.switchOnUses} (当前账号: ${this.currentAuthIndex})`
+      );
+      if (this.usageCount >= this.config.switchOnUses) {
+        this.needsSwitchingAfterRequest = true;
+      }
+    }
+
     // 1. 翻译请求体
     let googleBody;
     try {
@@ -377,6 +388,15 @@ class RequestHandler {
       this.connectionRegistry.removeMessageQueue(requestId);
       if (!res.writableEnded) {
         res.end();
+      }
+      if (this.needsSwitchingAfterRequest) {
+        this.logger.info(
+          `[Auth] 轮换计数已达到切换阈值 (${this.usageCount}/${this.config.switchOnUses})，将在后台自动切换账号...`
+        );
+        this._switchToNextAuth().catch((err) => {
+          this.logger.error(`[Auth] 后台账号切换任务失败: ${err.message}`);
+        });
+        this.needsSwitchingAfterRequest = false;
       }
     }
   }
