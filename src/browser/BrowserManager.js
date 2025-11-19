@@ -145,7 +145,7 @@ class BrowserManager {
 
       this.logger.info(`[Browser] 正在导航至目标网页...`);
       const targetUrl =
-        "https://aistudio.google.com/u/0/apps/bundled/blank?showCode=true&showAssistant=true";
+        "https://aistudio.google.com/u/0/apps/bundled/blank?showAssistant=true&showPreview=true";
       await this.page.goto(targetUrl, {
         timeout: 30000,
         waitUntil: "commit",
