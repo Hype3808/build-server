@@ -427,10 +427,14 @@ class RequestHandler {
     const connectionMaintainer = setInterval(() => {
       if (!res.writableEnded) {
         const heartbeat = {
-          "choices": [{
-            "index": 0,
-            "delta": {"role": "assistant", "content": ""},
-            "finish_reason": null
+          id: `chatcmpl-${proxyRequest.request_id}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: model,
+          choices: [{
+            index: 0,
+            delta: { role: "assistant", content: "" },
+            finish_reason: null
           }]
         };
         res.write(`data: ${JSON.stringify(heartbeat)}\n\n`);
@@ -551,28 +555,65 @@ class RequestHandler {
       const endMessage = await messageQueue.dequeue();
       
       if (dataMessage.data) {
-        // 将Google响应转换为OpenAI流式格式
-        const translatedChunk = this._translateGoogleToOpenAIStream(
-          dataMessage.data,
-          model
-        );
-        if (translatedChunk) {
-          res.write(translatedChunk);
+        // In fake mode, dataMessage.data contains the full JSON response (not SSE formatted)
+        // Parse it and convert to OpenAI streaming format
+        try {
+          const googleResponse = JSON.parse(dataMessage.data);
+          const candidate = googleResponse.candidates?.[0];
+          
+          let content = "";
+          if (candidate && candidate.content && Array.isArray(candidate.content.parts)) {
+            const imagePart = candidate.content.parts.find((p) => p.inlineData);
+            if (imagePart) {
+              const image = imagePart.inlineData;
+              content = `![Generated Image](data:${image.mimeType};base64,${image.data})`;
+              this.logger.info("[Adapter] 从 parts.inlineData 中成功解析到图片。");
+            } else {
+              content = candidate.content.parts.map((p) => p.text).join("") || "";
+            }
+          }
+          
+          const finishReason = candidate?.finishReason || "stop";
+          
+          // Send the content chunk
+          const contentChunk = {
+            id: `chatcmpl-${proxyRequest.request_id}`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            choices: [{
+              index: 0,
+              delta: { content: content },
+              finish_reason: null
+            }]
+          };
+          res.write(`data: ${JSON.stringify(contentChunk)}\n\n`);
+          
+          // Send the final chunk with finish_reason
+          const finalChunk = {
+            id: `chatcmpl-${proxyRequest.request_id}`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            choices: [{
+              index: 0,
+              delta: {},
+              finish_reason: finishReason
+            }]
+          };
+          res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+          
+          this.logger.info(
+            `✅ [Request] OpenAI伪流式响应结束，原因: ${finishReason}，请求ID: ${proxyRequest.request_id}`
+          );
+        } catch (e) {
+          this.logger.error(`[Adapter] 解析响应失败: ${e.message}`);
         }
       }
       
       if (endMessage.type !== "STREAM_END") {
         this.logger.warn("[Request] 未收到预期的流结束信号。");
       }
-      
-      try {
-        const fullResponse = JSON.parse(dataMessage.data);
-        const finishReason =
-          fullResponse.candidates?.[0]?.finishReason || "UNKNOWN";
-        this.logger.info(
-          `✅ [Request] OpenAI伪流式响应结束，原因: ${finishReason}，请求ID: ${proxyRequest.request_id}`
-        );
-      } catch (e) {}
       
       res.write("data: [DONE]\n\n");
     } catch (error) {
@@ -639,30 +680,39 @@ class RequestHandler {
         break;
       }
       if (message.data) {
-        const translatedChunk = this._translateGoogleToOpenAIStream(
-          message.data,
-          model
-        );
-        if (translatedChunk) {
-          res.write(translatedChunk);
+        // In real mode, message.data contains SSE-formatted chunks from Google
+        // We need to parse each SSE chunk and translate it to OpenAI format
+        const lines = message.data.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const jsonData = line.substring(6).trim();
+            if (jsonData && jsonData !== '[DONE]') {
+              const translatedChunk = this._translateGoogleToOpenAIStream(
+                jsonData,
+                model
+              );
+              if (translatedChunk) {
+                res.write(translatedChunk);
+              }
+              lastGoogleChunk = jsonData;
+            }
+          }
         }
-        lastGoogleChunk = message.data;
       }
     }
 
     try {
-      if (lastGoogleChunk.startsWith("data: ")) {
-        const jsonString = lastGoogleChunk.substring(6).trim();
-        if (jsonString) {
-          const lastResponse = JSON.parse(jsonString);
-          const finishReason =
-            lastResponse.candidates?.[0]?.finishReason || "UNKNOWN";
-          this.logger.info(
-            `✅ [Request] OpenAI流式响应结束，原因: ${finishReason}，请求ID: ${proxyRequest.request_id}`
-          );
-        }
+      if (lastGoogleChunk) {
+        const lastResponse = JSON.parse(lastGoogleChunk);
+        const finishReason =
+          lastResponse.candidates?.[0]?.finishReason || "UNKNOWN";
+        this.logger.info(
+          `✅ [Request] OpenAI流式响应结束，原因: ${finishReason}，请求ID: ${proxyRequest.request_id}`
+        );
       }
-    } catch (e) {}
+    } catch (e) {
+      this.logger.warn(`[Request] 无法解析最后一个响应块: ${e.message}`);
+    }
   }
 
   async _handleOpenAINonStreamResponse(proxyRequest, messageQueue, model, res) {
@@ -1334,22 +1384,16 @@ class RequestHandler {
   }
 
   _translateGoogleToOpenAIStream(googleChunk, modelName = "gemini-pro") {
+    // googleChunk should be the JSON string (without "data: " prefix)
     if (!googleChunk || googleChunk.trim() === "") {
       return null;
     }
 
-    let jsonString = googleChunk;
-    if (jsonString.startsWith("data: ")) {
-      jsonString = jsonString.substring(6).trim();
-    }
-
-    if (!jsonString || jsonString === "[DONE]") return null;
-
     let googleResponse;
     try {
-      googleResponse = JSON.parse(jsonString);
+      googleResponse = JSON.parse(googleChunk);
     } catch (e) {
-      this.logger.warn(`[Adapter] 无法解析Google返回的JSON块: ${jsonString}`);
+      this.logger.warn(`[Adapter] 无法解析Google返回的JSON块: ${googleChunk}`);
       return null;
     }
 
