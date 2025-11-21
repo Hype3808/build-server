@@ -20,6 +20,7 @@ class RequestHandler {
     this.isAuthSwitching = false;
     this.needsSwitchingAfterRequest = false;
     this.isSystemBusy = false;
+    this.fakeStreamPrefix = "假流式/";
   }
 
   get currentAuthIndex() {
@@ -278,6 +279,7 @@ class RequestHandler {
         req.path.includes("streamGenerateContent"));
 
     const proxyRequest = this._buildProxyRequest(req, requestId);
+    const mixModelContext = this._normalizeModelIdentifierInPath(proxyRequest);
     proxyRequest.is_generative = isGenerativeRequest;
     // 根据判断结果，为浏览器脚本准备标志位
     const messageQueue = this.connectionRegistry.createMessageQueue(requestId);
@@ -288,11 +290,14 @@ class RequestHandler {
 
     try {
       if (wantsStream) {
-        // --- 客户端想要流式响应 ---
-        this.logger.info(
-          `[Request] 客户端启用流式传输 (${this.serverSystem.streamingMode})，进入流式处理模式...`
+        const resolvedStreamMode = this._resolveStreamingModeForRequest(
+          mixModelContext
         );
-        if (this.serverSystem.streamingMode === "fake") {
+        proxyRequest.streaming_mode = resolvedStreamMode;
+        this.logger.info(
+          `[Request] 客户端启用流式传输 (模式: ${resolvedStreamMode})，进入流式处理模式...`
+        );
+        if (resolvedStreamMode === "fake") {
           await this._handlePseudoStreamResponse(
             proxyRequest,
             messageQueue,
@@ -328,6 +333,8 @@ class RequestHandler {
     const requestId = this._generateRequestId();
     const isOpenAIStream = req.body.stream === true;
     const model = req.body.model || "gemini-1.5-pro-latest";
+    const openAIModelContext = this._normalizeMixModeModelId(model);
+    const googleModel = openAIModelContext.normalizedModel || model;
 
     if (this.isSystemBusy) {
       this.logger.warn("[Request] 正在切换账号，拒绝新请求");
@@ -368,7 +375,7 @@ class RequestHandler {
       ? "streamGenerateContent"
       : "generateContent";
     const proxyRequest = {
-      path: `/v1beta/models/${model}:${googleEndpoint}`,
+      path: `/v1beta/models/${googleModel}:${googleEndpoint}`,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       query_params: isOpenAIStream ? { alt: "sse" } : {},
@@ -384,15 +391,30 @@ class RequestHandler {
     try {
       // 根据流式模式选择不同的处理方式
       if (isOpenAIStream) {
-        if (this.serverSystem.streamingMode === "fake") {
+        const resolvedStreamMode = this._resolveStreamingModeForRequest(
+          openAIModelContext
+        );
+        proxyRequest.streaming_mode = resolvedStreamMode;
+        if (resolvedStreamMode === "fake") {
           // 使用伪流式模式处理
-          await this._handleOpenAIPseudoStreamResponse(proxyRequest, messageQueue, model, res);
+          await this._handleOpenAIPseudoStreamResponse(
+            proxyRequest,
+            messageQueue,
+            model,
+            res
+          );
         } else {
           // 使用真实流式模式处理
-          await this._handleOpenAIRealStreamResponse(proxyRequest, messageQueue, model, res);
+          await this._handleOpenAIRealStreamResponse(
+            proxyRequest,
+            messageQueue,
+            model,
+            res
+          );
         }
       } else {
         // 非流式请求
+        proxyRequest.streaming_mode = "fake";
         await this._handleOpenAINonStreamResponse(proxyRequest, messageQueue, model, res);
       }
     } catch (error) {
@@ -418,6 +440,8 @@ class RequestHandler {
     this.logger.info(
       "[Request] OpenAI客户端启用流式传输 (fake)，进入伪流式处理模式..."
     );
+    res.locals = res.locals || {};
+    res.locals.__proxyPseudoStream = true;
     res.status(200).set({
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -987,6 +1011,10 @@ class RequestHandler {
     }
   }
 
+  appendMixModeModelVariants(models, { force = false } = {}) {
+    return this._appendMixModeVariants(models, force);
+  }
+
   _forwardRequest(proxyRequest) {
     const connection = this.connectionRegistry.getFirstConnection();
     if (connection) {
@@ -1034,6 +1062,8 @@ class RequestHandler {
     this.logger.info(
       "[Request] 客户端启用流式传输 (fake)，进入伪流式处理模式..."
     );
+    res.locals = res.locals || {};
+    res.locals.__proxyPseudoStream = true;
     res.status(200).set({
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -1358,6 +1388,15 @@ class RequestHandler {
           }
         }
 
+        const mixAugmentation = this._augmentModelPayloadForMixMode(
+          proxyRequest.path,
+          parsedBody
+        );
+        if (mixAugmentation.changed) {
+          parsedBody = mixAugmentation.payload;
+          needsReserialization = true;
+        }
+
         if (needsReserialization) {
           fullBody = JSON.stringify(parsedBody);
         }
@@ -1403,7 +1442,11 @@ class RequestHandler {
   _handleRequestError(error, res) {
     if (res.headersSent) {
       this.logger.error(`[Request] 请求处理错误 (头已发送): ${error.message}`);
-      if (this.serverSystem.streamingMode === "fake")
+      const expectsPseudoChunks = Boolean(
+        res?.locals?.__proxyPseudoStream ||
+          this.serverSystem.streamingMode === "fake"
+      );
+      if (expectsPseudoChunks)
         this._sendErrorChunkToClient(res, `处理失败: ${error.message}`);
       if (!res.writableEnded) res.end();
     } else {
@@ -1571,6 +1614,350 @@ class RequestHandler {
     };
 
     return `data: ${JSON.stringify(openaiResponse)}\n\n`;
+  }
+
+  _normalizeModelIdentifierInPath(proxyRequest) {
+    if (!this._isMixStreamingEnabled()) {
+      return null;
+    }
+    const info = this._extractModelPathInfo(proxyRequest.path);
+    if (!info) {
+      return null;
+    }
+    const context = {
+      requestedModel: info.decodedModelId,
+      normalizedModel: info.decodedModelId,
+      isFake: this._isFakeStreamModelId(info.decodedModelId),
+    };
+
+    if (context.isFake) {
+      const stripped = this._stripFakeStreamPrefix(info.decodedModelId);
+      if (stripped) {
+        const encodedNormalized = encodeURIComponent(stripped);
+        proxyRequest.path = `${info.basePath}${encodedNormalized}${info.suffix}`;
+        context.normalizedModel = stripped;
+      }
+    }
+
+    proxyRequest.requestedModel = context.requestedModel;
+    proxyRequest.normalizedModel = context.normalizedModel;
+    proxyRequest.isFakeStreamModel = context.isFake;
+    return context;
+  }
+
+  _normalizeMixModeModelId(modelId) {
+    const normalizedModelId = typeof modelId === "string" ? modelId : "";
+    const isFake =
+      this._isMixStreamingEnabled() &&
+      this._isFakeStreamModelId(normalizedModelId);
+    const stripped = isFake
+      ? this._stripFakeStreamPrefix(normalizedModelId)
+      : normalizedModelId;
+    return {
+      requestedModel: normalizedModelId,
+      normalizedModel: stripped || normalizedModelId,
+      isFake,
+    };
+  }
+
+  _resolveStreamingModeForRequest(modelContext) {
+    if (this.serverSystem.streamingMode !== "mix") {
+      return this.serverSystem.streamingMode;
+    }
+    return modelContext?.isFake ? "fake" : "real";
+  }
+
+  _appendMixModeVariants(models, force = false) {
+    if (
+      (!force && !this._isMixStreamingEnabled()) ||
+      !Array.isArray(models) ||
+      models.length === 0
+    ) {
+      return models;
+    }
+
+    const existingIds = new Set();
+    for (const model of models) {
+      const identifier = this._getModelIdentifier(model);
+      if (identifier) {
+        existingIds.add(identifier);
+      }
+    }
+
+    const additions = [];
+    for (const model of models) {
+      const identifier = this._getModelIdentifier(model);
+      if (!identifier) continue;
+      if (this._isFakeStreamModelId(identifier)) continue;
+      if (!this._isTextModelDescriptor(model, identifier)) continue;
+
+      const fakeId = `${this.fakeStreamPrefix}${identifier}`;
+      if (existingIds.has(fakeId)) continue;
+
+      const variant = this._cloneModelDescriptorWithFakePrefix(
+        model,
+        identifier
+      );
+      if (variant) {
+        additions.push(variant);
+        existingIds.add(fakeId);
+      }
+    }
+
+    if (additions.length === 0) {
+      return models;
+    }
+
+    return [...models, ...additions];
+  }
+
+  _augmentModelPayloadForMixMode(path, payload) {
+    if (!this._isMixStreamingEnabled() || !this._isModelListingPath(path)) {
+      return { payload, changed: false };
+    }
+    if (!payload) {
+      return { payload, changed: false };
+    }
+
+    if (Array.isArray(payload)) {
+      const augmented = this._appendMixModeVariants(payload);
+      return { payload: augmented, changed: augmented !== payload };
+    }
+
+    let changed = false;
+    let nextPayload = payload;
+
+    if (Array.isArray(payload.models)) {
+      const augmentedModels = this._appendMixModeVariants(payload.models);
+      if (augmentedModels !== payload.models) {
+        nextPayload = { ...nextPayload, models: augmentedModels };
+        changed = true;
+      }
+    }
+
+    if (Array.isArray(payload.data)) {
+      const augmentedData = this._appendMixModeVariants(payload.data);
+      if (augmentedData !== payload.data) {
+        if (nextPayload === payload) {
+          nextPayload = { ...nextPayload };
+        }
+        nextPayload.data = augmentedData;
+        changed = true;
+      }
+    }
+
+    return { payload: nextPayload, changed };
+  }
+
+  _getModelIdentifier(model) {
+    if (!model) return null;
+    if (typeof model === "string") {
+      return model;
+    }
+    if (typeof model.id === "string" && model.id.length > 0) {
+      return model.id.includes("/") ? model.id.split("/").pop() : model.id;
+    }
+    if (typeof model.name === "string" && model.name.length > 0) {
+      return model.name.includes("/")
+        ? model.name.split("/").pop()
+        : model.name;
+    }
+    if (typeof model.displayName === "string") {
+      return model.displayName;
+    }
+    return null;
+  }
+
+  _isTextModelDescriptor(model, identifier) {
+    const modelId = (identifier || this._getModelIdentifier(model) || "")
+      .toLowerCase()
+      .trim();
+    if (!modelId) return false;
+
+    const blockedKeywords = [
+      "embed",
+      "embedding",
+      "search",
+      "moderation",
+      "speech",
+      "audio",
+      "vision",
+      "image",
+      "video",
+    ];
+    if (blockedKeywords.some((keyword) => modelId.includes(keyword))) {
+      return false;
+    }
+
+    const supportedMethods = this._getSupportedMethods(model);
+    if (supportedMethods.length === 0) {
+      return true;
+    }
+
+    const normalizedMethods = supportedMethods.map((method) =>
+      String(method || "").toLowerCase()
+    );
+    const textMethods = [
+      "generatecontent",
+      "streamgeneratecontent",
+      "createcontent",
+      "generateanswer",
+      "generatechatcompletions",
+      "respond",
+    ];
+
+    const hasTextMethod = normalizedMethods.some((method) =>
+      textMethods.some((textMethod) => method.includes(textMethod))
+    );
+    if (hasTextMethod) {
+      return true;
+    }
+
+    const isEmbedOnly = normalizedMethods.every((method) =>
+      method.includes("embed")
+    );
+    return !isEmbedOnly;
+  }
+
+  _getSupportedMethods(model) {
+    if (!model || typeof model !== "object") {
+      return [];
+    }
+    if (Array.isArray(model.supportedGenerationMethods)) {
+      return model.supportedGenerationMethods;
+    }
+    if (Array.isArray(model.supported_generation_methods)) {
+      return model.supported_generation_methods;
+    }
+    if (Array.isArray(model.supportedMethods)) {
+      return model.supportedMethods;
+    }
+    return [];
+  }
+
+  _cloneModelDescriptorWithFakePrefix(model, identifier) {
+    const fakeId = `${this.fakeStreamPrefix}${identifier}`;
+    if (typeof model === "string") {
+      return fakeId;
+    }
+
+    const clone = { ...model };
+    clone.id = fakeId;
+
+    if (typeof clone.name === "string" && clone.name.length > 0) {
+      clone.name = this._prefixModelName(clone.name, identifier);
+    } else {
+      clone.name = `models/${fakeId}`;
+    }
+
+    if (typeof clone.displayName === "string" && clone.displayName.length > 0) {
+      const cleanName = clone.displayName.startsWith(this.fakeStreamPrefix)
+        ? clone.displayName.slice(this.fakeStreamPrefix.length)
+        : clone.displayName;
+      clone.displayName = `${this.fakeStreamPrefix}${cleanName}`;
+    } else {
+      clone.displayName = `${this.fakeStreamPrefix}${identifier}`;
+    }
+
+    return clone;
+  }
+
+  _prefixModelName(originalName, identifier) {
+    const baseId = `${this.fakeStreamPrefix}${identifier}`;
+    if (typeof originalName !== "string" || originalName.length === 0) {
+      return `models/${baseId}`;
+    }
+    const lastSlashIndex = originalName.lastIndexOf("/");
+    if (lastSlashIndex === -1) {
+      return baseId;
+    }
+    const basePath = originalName.slice(0, lastSlashIndex + 1);
+    return `${basePath}${baseId}`;
+  }
+
+  _extractModelPathInfo(path) {
+    if (typeof path !== "string") {
+      return null;
+    }
+    const prefixes = ["/v1beta/models/", "/v1/models/"];
+    let basePath = null;
+    for (const prefix of prefixes) {
+      if (path.startsWith(prefix)) {
+        basePath = prefix;
+        break;
+      }
+    }
+    if (!basePath) {
+      return null;
+    }
+
+    const remainder = path.slice(basePath.length);
+    if (!remainder) {
+      return null;
+    }
+
+    let splitIndex = remainder.length;
+    const colonIndex = remainder.indexOf(":");
+    if (colonIndex !== -1) {
+      splitIndex = colonIndex;
+    } else {
+      const startsWithFakePrefix =
+        this._isMixStreamingEnabled() &&
+        remainder.startsWith(this.fakeStreamPrefix);
+      if (!startsWithFakePrefix) {
+        const slashIndex = remainder.indexOf("/");
+        if (slashIndex !== -1) {
+          splitIndex = slashIndex;
+        }
+      }
+    }
+
+    const encodedSegment = remainder.slice(0, splitIndex);
+    const suffix = remainder.slice(splitIndex);
+    if (!encodedSegment) {
+      return null;
+    }
+
+    let decodedSegment = encodedSegment;
+    try {
+      decodedSegment = decodeURIComponent(encodedSegment);
+    } catch (err) {
+      this.logger.debug?.(
+        `[Request] 无法解码模型标识 ${encodedSegment}: ${err.message}`
+      );
+    }
+
+    return {
+      basePath,
+      encodedModelSegment: encodedSegment,
+      suffix,
+      decodedModelId: decodedSegment,
+    };
+  }
+
+  _isMixStreamingEnabled() {
+    return this.serverSystem.streamingMode === "mix";
+  }
+
+  _isFakeStreamModelId(modelId) {
+    return (
+      typeof modelId === "string" && modelId.startsWith(this.fakeStreamPrefix)
+    );
+  }
+
+  _stripFakeStreamPrefix(modelId) {
+    if (!this._isFakeStreamModelId(modelId)) {
+      return modelId;
+    }
+    return modelId.slice(this.fakeStreamPrefix.length);
+  }
+
+  _isModelListingPath(path) {
+    if (typeof path !== "string") {
+      return false;
+    }
+    const trimmed = path.endsWith("/") ? path.slice(0, -1) : path;
+    return trimmed === "/v1/models" || trimmed === "/v1beta/models";
   }
 }
 

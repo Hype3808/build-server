@@ -158,6 +158,20 @@ class ConfigLoader {
       config.modelList = ["gemini-1.5-pro-latest"]; // 出错时也使用备用模型
     }
 
+    if (typeof config.streamingMode === "string") {
+      config.streamingMode = config.streamingMode.trim().toLowerCase();
+    } else {
+      config.streamingMode = "real";
+    }
+
+    const validStreamingModes = ["real", "fake", "mix"];
+    if (!validStreamingModes.includes(config.streamingMode)) {
+      logger.warn(
+        `[System] 检测到未知流模式 "${config.streamingMode}"，已回退为 real。`
+      );
+      config.streamingMode = "real";
+    }
+
     logger.info("================ [ 生效配置 ] ================");
     logger.info(`  HTTP 服务端口: ${config.httpPort}`);
     logger.info(`  监听地址: ${config.host}`);

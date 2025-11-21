@@ -265,10 +265,12 @@ ${accountDetailsHtml}
     }
 
     function toggleStreamingMode() { 
-        const newMode = prompt('请输入新的流模式 (real 或 fake):', '${
+        const userInput = prompt('请输入新的流模式 (real、fake 或 mix):', '${
           config.streamingMode
         }');
-        if (newMode === 'fake' || newMode === 'real') {
+        if (userInput === null) { return; }
+        const newMode = userInput.trim().toLowerCase();
+        if (newMode === 'fake' || newMode === 'real' || newMode === 'mix') {
             fetch('/api/set-mode', { 
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' }, 
@@ -277,7 +279,7 @@ ${accountDetailsHtml}
             .then(res => res.text()).then(data => { alert(data); updateContent(); })
             .catch(err => alert('设置失败: ' + err));
         } else if (newMode !== null) { 
-            alert('无效的模式！请只输入 "real" 或 "fake"。'); 
+          alert('无效的模式！请只输入 "real"、"fake" 或 "mix"。'); 
         } 
     }
 
@@ -377,15 +379,17 @@ ${accountDetailsHtml}
   });
 
   app.post("/api/set-mode", isAuthenticated, (req, res) => {
-    const newMode = req.body.mode;
-    if (newMode === "fake" || newMode === "real") {
+    const newMode = typeof req.body.mode === "string"
+      ? req.body.mode.trim().toLowerCase()
+      : "";
+    if (newMode === "fake" || newMode === "real" || newMode === "mix") {
       serverSystem.streamingMode = newMode;
       logger.info(
         `[WebUI] 流式模式已由认证用户切换为: ${serverSystem.streamingMode}`
       );
       res.status(200).send(`流式模式已切换为: ${serverSystem.streamingMode}`);
     } else {
-      res.status(400).send('无效模式. 请用 "fake" 或 "real".');
+      res.status(400).send('无效模式. 请用 "fake"、"real" 或 "mix".');
     }
   });
 
@@ -411,11 +415,19 @@ ${accountDetailsHtml}
 
   // Model list endpoint
   app.get("/v1/models", async (req, res) => {
+    const normalizeModelId = (value) => {
+      if (typeof value !== "string" || value.length === 0) {
+        return "unknown-model";
+      }
+      return value.startsWith("models/") ? value.slice("models/".length) : value;
+    };
+
     const buildModelPayload = (model) => {
       const nowSeconds = Math.floor(Date.now() / 1000);
       if (typeof model === "string") {
+        const normalizedStringId = normalizeModelId(model);
         return {
-          id: model,
+          id: normalizedStringId,
           object: "model",
           created: nowSeconds,
           owned_by: "google",
@@ -425,10 +437,8 @@ ${accountDetailsHtml}
         };
       }
 
-      const rawName = model?.name || model?.id || model?.displayName || "unknown-model";
-      const normalizedId = rawName.includes("/")
-        ? rawName.split("/").pop()
-        : rawName;
+      const rawId = model?.id || model?.name || model?.displayName || "unknown-model";
+      const normalizedId = normalizeModelId(rawId);
       let created = nowSeconds;
       if (model?.createTime) {
         const parsed = Date.parse(model.createTime);
@@ -450,17 +460,29 @@ ${accountDetailsHtml}
 
     try {
       const upstreamModels = await requestHandler.fetchAvailableModels();
-      if (upstreamModels.length === 0) {
+      const shouldAugment = serverSystem.streamingMode === "mix";
+      const modelsWithVariants = shouldAugment
+        ? requestHandler.appendMixModeModelVariants(upstreamModels, {
+            force: true,
+          })
+        : upstreamModels;
+      if (modelsWithVariants.length === 0) {
         throw new Error("上游未返回任何模型。");
       }
-      const payload = upstreamModels.map(buildModelPayload);
+      const payload = modelsWithVariants.map(buildModelPayload);
       return res.status(200).json({ object: "list", data: payload });
     } catch (error) {
       logger.warn(
         `[Models] 实时获取模型列表失败: ${error.message}，将回退到本地配置。`
       );
       const fallbackIds = config.modelList || ["gemini-2.5-pro"];
-      const fallbackPayload = fallbackIds.map(buildModelPayload);
+      const shouldAugmentFallback = serverSystem.streamingMode === "mix";
+      const fallbackList = shouldAugmentFallback
+        ? requestHandler.appendMixModeModelVariants(fallbackIds, {
+            force: true,
+          })
+        : fallbackIds;
+      const fallbackPayload = fallbackList.map(buildModelPayload);
       return res.status(200).json({ object: "list", data: fallbackPayload });
     }
   });
