@@ -423,6 +423,21 @@ class RequestHandler {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    } else {
+      this._flushResponse(res);
+    }
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    } else {
+      this._flushResponse(res);
+    }
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    } else {
+      this._flushResponse(res);
+    }
     // Send heartbeat every 3 seconds to prevent gateway timeout
     const connectionMaintainer = setInterval(() => {
       if (!res.writableEnded) {
@@ -437,7 +452,7 @@ class RequestHandler {
             finish_reason: null
           }]
         };
-        res.write(`data: ${JSON.stringify(heartbeat)}\n\n`);
+        this._writeSseChunk(res, `data: ${JSON.stringify(heartbeat)}\n\n`);
       } else {
         clearInterval(connectionMaintainer);
       }
@@ -525,9 +540,9 @@ class RequestHandler {
               finish_reason: "stop"
             }]
           })}\n\n`;
-          res.write(errorChunk);
+          this._writeSseChunk(res, errorChunk);
         }
-        res.write("data: [DONE]\n\n");
+        this._writeSseChunk(res, "data: [DONE]\n\n");
         return;
       }
 
@@ -587,7 +602,7 @@ class RequestHandler {
               finish_reason: null
             }]
           };
-          res.write(`data: ${JSON.stringify(contentChunk)}\n\n`);
+          this._writeSseChunk(res, `data: ${JSON.stringify(contentChunk)}\n\n`);
           
           // Send the final chunk with finish_reason
           const finalChunk = {
@@ -601,7 +616,7 @@ class RequestHandler {
               finish_reason: finishReason
             }]
           };
-          res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+          this._writeSseChunk(res, `data: ${JSON.stringify(finalChunk)}\n\n`);
           
           this.logger.info(
             `✅ [Request] OpenAI伪流式响应结束，原因: ${finishReason}，请求ID: ${proxyRequest.request_id}`
@@ -615,7 +630,7 @@ class RequestHandler {
         this.logger.warn("[Request] 未收到预期的流结束信号。");
       }
       
-      res.write("data: [DONE]\n\n");
+      this._writeSseChunk(res, "data: [DONE]\n\n");
     } catch (error) {
       this._handleRequestError(error, res);
     } finally {
@@ -642,7 +657,7 @@ class RequestHandler {
       await this._handleRequestFailureAndSwitch(initialMessage, res);
 
       if (!res.writableEnded) {
-        res.write("data: [DONE]\n\n");
+        this._writeSseChunk(res, "data: [DONE]\n\n");
         res.end();
       }
       return;
@@ -673,31 +688,97 @@ class RequestHandler {
     });
 
     let lastGoogleChunk = "";
+    let sseBuffer = "";
+
+    const processSseEvent = (rawEvent) => {
+      const lines = rawEvent.split("\n");
+      const dataLines = [];
+      for (const line of lines) {
+        if (!line) continue;
+        if (line.startsWith(":")) {
+          continue;
+        }
+        if (line.startsWith("data:")) {
+          const value = line.slice(5).trimStart();
+          dataLines.push(value);
+        }
+      }
+
+      if (dataLines.length === 0) {
+        return;
+      }
+
+      const payload = dataLines.join("\n").trim();
+      if (!payload || payload === "[DONE]") {
+        return;
+      }
+
+      const translatedChunk = this._translateGoogleToOpenAIStream(
+        payload,
+        model
+      );
+              if (translatedChunk) {
+                this._writeSseChunk(res, translatedChunk);
+              }
+      lastGoogleChunk = payload;
+    };
+
+    const processSseBuffer = () => {
+      let delimiterIndex;
+      while ((delimiterIndex = sseBuffer.indexOf("\n\n")) !== -1) {
+        const rawEvent = sseBuffer.slice(0, delimiterIndex);
+        sseBuffer = sseBuffer.slice(delimiterIndex + 2);
+        if (rawEvent.trim()) {
+          processSseEvent(rawEvent);
+        }
+      }
+    };
+
     while (true) {
       const message = await messageQueue.dequeue(300000);
       if (message.type === "STREAM_END") {
-        res.write("data: [DONE]\n\n");
+        if (sseBuffer.trim()) {
+          sseBuffer += "\n\n";
+          processSseBuffer();
+        }
+        this._writeSseChunk(res, "data: [DONE]\n\n");
         break;
       }
-      if (message.data) {
-        // In real mode, message.data contains SSE-formatted chunks from Google
-        // We need to parse each SSE chunk and translate it to OpenAI format
-        const lines = message.data.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const jsonData = line.substring(6).trim();
-            if (jsonData && jsonData !== '[DONE]') {
-              const translatedChunk = this._translateGoogleToOpenAIStream(
-                jsonData,
-                model
-              );
-              if (translatedChunk) {
-                res.write(translatedChunk);
-              }
-              lastGoogleChunk = jsonData;
-            }
-          }
-        }
+      if (message.event_type === "error") {
+        this.logger.error(
+          `[Adapter] 浏览器流式处理中断。状态码: ${
+            message.status || "未知"
+          }, 信息: ${message.message || "未知"}`
+        );
+        await this._handleRequestFailureAndSwitch(message, res);
+        const errorChunk = {
+          id: `chatcmpl-${proxyRequest.request_id}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: model,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                content: `[代理系统提示] 上游流式传输失败: ${
+                  message.message || "未知错误"
+                }`,
+              },
+              finish_reason: "error",
+            },
+          ],
+        };
+        this._writeSseChunk(res, `data: ${JSON.stringify(errorChunk)}\n\n`);
+        this._writeSseChunk(res, "data: [DONE]\n\n");
+        return;
+      }
+
+      if (typeof message.data === "string" && message.data.length > 0) {
+        const normalizedChunk = message.data
+          .replace(/\r\n/g, "\n")
+          .replace(/\r/g, "\n");
+        sseBuffer += normalizedChunk;
+        processSseBuffer();
       }
     }
 
@@ -925,8 +1006,27 @@ class RequestHandler {
     };
     const chunk = `data: ${JSON.stringify(errorPayload)}\n\n`;
     if (res && !res.writableEnded) {
-      res.write(chunk);
+      this._writeSseChunk(res, chunk);
       this.logger.info(`[Request] 已向客户端发送标准错误信号: ${errorMessage}`);
+    }
+  }
+
+  _writeSseChunk(res, chunk) {
+    if (!res || res.writableEnded) return;
+    res.write(chunk);
+    this._flushResponse(res);
+  }
+
+  _flushResponse(res) {
+    if (!res) return;
+    try {
+      if (typeof res.flush === "function") {
+        res.flush();
+      } else if (res.socket && typeof res.socket.flush === "function") {
+        res.socket.flush();
+      }
+    } catch (flushError) {
+      this.logger.debug?.(`[Request] SSE flush skipped: ${flushError.message}`);
     }
   }
 
@@ -939,10 +1039,28 @@ class RequestHandler {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    } else {
+      this._flushResponse(res);
+    }
     // Send heartbeat every 3 seconds to prevent gateway timeout
     const connectionMaintainer = setInterval(() => {
       if (!res.writableEnded) {
-        res.write(": keep-alive\n\n");
+        const heartbeatChunk = {
+          id: `chatcmpl-${proxyRequest.request_id}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: proxyRequest.path || "proxy-pseudo-stream",
+          choices: [
+            {
+              index: 0,
+              delta: { role: "assistant", content: "" },
+              finish_reason: null,
+            },
+          ],
+        };
+        this._writeSseChunk(res, `data: ${JSON.stringify(heartbeatChunk)}\n\n`);
       } else {
         clearInterval(connectionMaintainer);
       }
@@ -1049,7 +1167,7 @@ class RequestHandler {
       const dataMessage = await messageQueue.dequeue();
       const endMessage = await messageQueue.dequeue();
       if (dataMessage.data) {
-        res.write(`data: ${dataMessage.data}\n\n`);
+        this._writeSseChunk(res, `data: ${dataMessage.data}\n\n`);
       }
       if (endMessage.type !== "STREAM_END") {
         this.logger.warn("[Request] 未收到预期的流结束信号。");
@@ -1062,7 +1180,7 @@ class RequestHandler {
           `✅ [Request] 响应结束，原因: ${finishReason}，请求ID: ${proxyRequest.request_id}`
         );
       } catch (e) {}
-      res.write("data: [DONE]\n\n");
+      this._writeSseChunk(res, "data: [DONE]\n\n");
     } catch (error) {
       this._handleRequestError(error, res);
     } finally {
@@ -1131,7 +1249,7 @@ class RequestHandler {
           break;
         }
         if (dataMessage.data) {
-          res.write(dataMessage.data);
+          this._writeSseChunk(res, dataMessage.data);
           lastChunk = dataMessage.data;
         }
       }
@@ -1275,6 +1393,11 @@ class RequestHandler {
     Object.entries(headers).forEach(([name, value]) => {
       if (name.toLowerCase() !== "content-length") res.set(name, value);
     });
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    } else {
+      this._flushResponse(res);
+    }
   }
 
   _handleRequestError(error, res) {
